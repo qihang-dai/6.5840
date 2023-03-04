@@ -24,6 +24,33 @@ type ExampleReply struct {
 
 // Add your RPC definitions here.
 
+type TaskType int
+
+const (
+	// for worker report task status in REQUEST
+	INIT = iota
+	DONE
+	// for coordinator to assign task to worker
+	MAP
+	REDUCE
+	WAIT
+)
+
+//request task from coordinator. also indicate the task status. since args communicate coordinator and worker in both directions, 
+//Files is used to send the processed file content to the coordinator but may looks useless when worker request task from coordinator
+type TaskArgs struct {
+	Type TaskType
+	Id  int
+	Files []string // when worker report task status, it will send the processed files to the coordinator
+}
+
+type TaskReply struct {
+	Type TaskType
+	Id  int
+	NReduce int
+	Files []string //assign single file name to map task in Files[0], assign intermediate file names to reduce tasks 
+}
+
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.

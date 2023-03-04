@@ -4,7 +4,7 @@ import "fmt"
 import "log"
 import "net/rpc"
 import "hash/fnv"
-
+import "time"
 
 //
 // Map functions return a slice of KeyValue.
@@ -13,6 +13,13 @@ type KeyValue struct {
 	Key   string
 	Value string
 }
+
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 //
 // use ihash(key) % NReduce to choose the reduce
@@ -35,8 +42,41 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
+	
+	var response TaskReply
+	var request TaskArgs = TaskArgs{INIT, 0}
 
+	for {
+		response = Communicate(&request) // get task from coordinator +  update req done or not
+		switch response.Type {
+			case MAP:
+				doMap(mapf, response)
+			case REDUCE:
+				doReduce(reducef, response)
+			case WAIT:
+				time.Sleep(1000)
+			case DONE:
+				break
+		}
+	}
 }
+
+//get task from coordinator +  update req done or not
+func Communicate(request *TaskArgs) TaskReply {
+	reply := TaskReply{}
+	ok := call("Coordinator.Coomunicate", request, &reply)
+	if !ok {
+		log.Fatal("ask for task failed")
+	}
+	log.Printf("ask for task: Type: %v , ID: %v", reply.Type, reply.Id)
+	return reply
+}
+
+func doMap(mapf func(string, string) []KeyValue, response TaskReply) {
+	
+}
+
+func doReduce(reducef func(string, []string) string, response TaskReply) {}
 
 //
 // example function to show how to make an RPC call to the coordinator.

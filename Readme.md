@@ -1,6 +1,6 @@
 # MIT 6.824
 
-My personal solutions and track to the MIT 6.824 distributed systems course.
+My personal solutions and track to the [MIT 6.824](https://pdos.csail.mit.edu/6.824/schedule.html) distributed systems course.
 
 Use 2023 version. The content are the same while the provided code is less buggy.
 
