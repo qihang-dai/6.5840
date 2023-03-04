@@ -1,10 +1,4 @@
-package main
-
-//
-// simple sequential MapReduce.
-//
-// go run mrsequential.go wc.so pg*.txt
-//
+package main // // simple sequential MapReduce.  // // go run mrsequential.go wc.so pg*.txt //
 
 import "fmt"
 import "6.5840/mr"

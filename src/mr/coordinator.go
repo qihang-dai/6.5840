@@ -28,7 +28,7 @@ type Coordinator struct {
 }
 
 // Your code here -- RPC handlers for the worker to call.
-func Communicate(request *TaskArgs, response *TaskReply) {
+func TalktoWorker(request *TaskArgs, response *TaskReply) {
 	c.RWMutex.Lock()
 	defer c.RWMutex.Unlock()
 
@@ -151,6 +151,23 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		mapTasks: make([]Task, len(files)),
 		reduceTasks: make([]Task, nReduce),
 	}
+
+	for i, file := range files {
+		c.mapTasks[i] = Task{
+			Type: MAP,
+			Id: i,
+			Files: []string{file},
+			Done: false,
+		}
+	}
+
+	for i := 0; i < nReduce; i++ {
+		c.reduceTasks[i] = Task{
+			Type: REDUCE,
+			Id: i,
+			Files: []string{},
+			Done: false,
+		}
 
 	c.server()
 	return &c
