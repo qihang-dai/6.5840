@@ -45,8 +45,8 @@ func Worker(mapf func(string, string) []KeyValue,
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
 	
-	var response TaskReply
-	var request TaskArgs = TaskArgs{INIT, 0, []string{}} //init request
+	var response TaskReply = TaskReply{}
+	var request TaskArgs = TaskArgs{Type: INIT}
 
 	for {
 		response = TalktoMaster(&request) // get task from coordinator +  update req done or not
@@ -56,9 +56,11 @@ func Worker(mapf func(string, string) []KeyValue,
 			case REDUCE:
 				doReduce(reducef, &request, &response)
 			case WAIT:
-				time.Sleep(1000)
+				log.Printf("wait for 500 ms")
+				time.Sleep(500 * time.Millisecond)
+				request.Type = INIT
 			case DONE:
-				break
+				return
 			default:
 				//panic and show the type of task, though it can only be INIT 
 				panic(fmt.Sprintf("unknown task type: %v", response.Type))
@@ -73,19 +75,23 @@ func TalktoMaster(request *TaskArgs) TaskReply {
 	if !ok {
 		log.Fatal("ask for task failed")
 	}
-	log.Printf("ask for task: Type: %v , ID: %v", reply.Type, reply.Id)
+	// log.Printf("ask for task: Type: %v , ID: %v", reply.Type, reply.Id)
 	return reply
 }
 
 func doMap(mapf func(string, string) []KeyValue, request *TaskArgs,response *TaskReply) {
+	log.Printf("do map task: %v", response.Id)
 	filename := response.Files[0]
 	file, err := os.Open(filename)
 	if err != nil {
 		log.Fatalf("cannot open %v", filename)
+		log.Fatal(err)
 	}
+	defer file.Close()
 	content, err := ioutil.ReadAll(file)
 	if err != nil {
 		log.Fatalf("cannot read %v", filename)
+		log.Fatal(err)
 	}
 
 	intermediate := mapf(filename, string(content))
@@ -98,50 +104,38 @@ func doMap(mapf func(string, string) []KeyValue, request *TaskArgs,response *Tas
 		reduceFileList[reduceId] = append(reduceFileList[reduceId], kv)
 	}
 
-	temp_file_names := make([]string, response.NReduce)
+	finished_files := make([]string, response.NReduce)
 	for reduceId, kvList := range reduceFileList {
-		temp_file_name := fmt.Sprintf("temp-%v-%v", response.Id, reduceId)
-		temp_file_names[reduceId] = temp_file_name
-		file, err := os.Create(temp_file_name)
-		defer file.Close()
-		if err != nil {
-			log.Fatalf("cannot create %v", temp_file_name)
-		}
-		enc := json.NewEncoder(file)
+		oname := fmt.Sprintf("mr-%v-%v", response.Id, reduceId)
+		ofile, _ := os.Create(oname)
+		defer ofile.Close()
+		enc := json.NewEncoder(ofile)
 		for _, kv := range kvList {
 			err := enc.Encode(&kv)
 			if err != nil {
-				log.Fatalf("cannot encode %v", kv)
+				log.Fatal(err)
 			}
 		}
-	}
-
-	//rename temp files to mr-out-* to ensure nobody read partially written files
-	fnished_files := make([]string, response.NReduce)
-	for reduceId, temp_file_name := range temp_file_names {
-		out_file_name := fmt.Sprintf("mr-%v-%v", response.Id, reduceId)
-		os.Rename(temp_file_name, out_file_name)
-		fnished_files[reduceId] = out_file_name
+		finished_files[reduceId] = oname
 	}
 
 	//mark task done
 	request.Id = response.Id
-	request.Type = DONE
-	request.Files = fnished_files
+	request.Type = MAP
+	request.Files = finished_files
 }
 
 func doReduce(reducef func(string, []string) string, request *TaskArgs, response *TaskReply) {
+	log.Printf("do reduce task: %v", response.Id)
 	intermediate := make([]KeyValue, 0)
-	
-	sort.Sort(ByKey(intermediate))
-	oname := fmt.Sprintf("mr-out-%v", response.Id)
-	ofile, _ := os.Create(oname)
-
 	for _, filename := range response.Files {
 		file, err := os.Open(filename)
 		if err != nil {
-			log.Fatalf("cannot open %v", filename)
+			// show error message
+			log.Fatalf("cannot open %v, error: %v", filename, err)
 		}
+		defer file.Close()
+
 		dec := json.NewDecoder(file)
 		for {
 			var kv KeyValue
@@ -150,31 +144,36 @@ func doReduce(reducef func(string, []string) string, request *TaskArgs, response
 			}
 			intermediate = append(intermediate, kv)
 		}
-	
-	
-		i := 0
-		// iterate through the sorted array, load all the values for the same key into an array value, and call reducef for the value array
-		// after that move the i pointer to the j pointer so that we can start with the next key in the file
-		for i < len(intermediate) {
-			j := i + 1
-			for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
-				j++
-			}
-			values := []string{}
-			for k := i; k < j; k++ {
-				values = append(values, intermediate[k].Value)
-			}
-			output := reducef(intermediate[i].Key, values)
-
-			// this is the correct format for each line of Reduce output.
-			fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
-
-			i = j
-		}
-		request.Id = response.Id
-		request.Type = REDUCE
-		request.Files = []string{oname}
 	}
+		
+	oname := fmt.Sprintf("mr-out-%v", response.Id)
+	ofile, _ := os.Create(oname)
+	defer ofile.Close()
+
+	sort.Sort(ByKey(intermediate))
+	
+	i := 0
+	// iterate through the sorted array, load all the values for the same key into an array value, and call reducef for the value array
+	// after that move the i pointer to the j pointer so that we can start with the next key in the file
+	for i < len(intermediate) {
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+		output := reducef(intermediate[i].Key, values)
+
+		// this is the correct format for each line of Reduce output.
+		fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+
+		i = j
+	}
+	request.Id = response.Id
+	request.Type = REDUCE
+	request.Files = []string{oname}
 }
 
 //

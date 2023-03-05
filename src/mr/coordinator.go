@@ -1,12 +1,21 @@
 package mr
 
-import "log"
-import "net"
-import "os"
-import "net/rpc"
-import "net/http"
-import "sync"
-import "time"
+import (
+	"log"
+	"net"
+	"net/http"
+	"net/rpc"
+	"os"
+	"sync"
+	"time"
+	"io/ioutil"
+)
+
+// log show line number and file name
+func init() {
+	log.SetFlags(log.Lshortfile | log.LstdFlags)
+	log.SetOutput(ioutil.Discard)
+}
 
 // only in coordinator for assign and mark done status
 
@@ -20,86 +29,90 @@ type Task struct{
 
 type Coordinator struct {
 	// Your definitions here.
-	mu sync.RWMutex
-	reduceLeft int // the number of reduce tasks is defined by the caller
+	mu sync.Mutex
+	reduceleft int // the number of reduce tasks is defined by the caller
 	mapleft int // the number of map tasks is the number of files
 	mapTasks []Task
 	reduceTasks []Task
 }
 
 // Your code here -- RPC handlers for the worker to call.
-func TalktoWorker(request *TaskArgs, response *TaskReply) {
-	c.RWMutex.Lock()
-	defer c.RWMutex.Unlock()
+func (c *Coordinator) TalktoWorker(request *TaskArgs, response *TaskReply) error{
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// log.Printf("request: Type: %v , ID: %v", request.Type, request.Id)
 
 	//when the worker finished the task, it will send a request with Map or Reduce statusto the coordinator.
 	//we mark the task in the task queue as done if the task is not done yet (in case of duplicate request)
+
+	//check if the request is a done request
 	switch request.Type {
 		case MAP:
 			if !c.mapTasks[request.Id].Done {
 				c.mapTasks[request.Id].Done = true
+				log.Printf("map task %v done", request.Id)
 
 				//when the worker finished the map task, it will send the processed intermediate file name to the coordinator
-				//we will assign the intermediate file name to the reduce task
-				for _, filename := range request.Files {
-					c.reduceTasks[request.Id].Files = append(c.reduceTasks[request.Id].Files, filename)
+				//we will assign the intermediate file name to the reduce tas
+				for id, file := range request.Files {
+					if len(file) > 0 {
+						c.reduceTasks[id].Files = append(c.reduceTasks[id].Files, file)
+					}
 				}
+
 				c.mapleft--
 			}
 		case REDUCE:
 			if !c.reduceTasks[request.Id].Done {
+				log.Printf("reduce task %v done", request.Id)
 				c.reduceTasks[request.Id].Done = true
 				c.reduceleft--
 			}
-		case INIT:
-			//when the worker request a task, it will send a INIT request to the coordinator
-			//we will assign a map task or reduce task to the worker
-			if c.nMap > 0 {
-				//check if there is (unfinished map task) and (has been work for more than 10 seconds) 
-				//new task will also be assinged since new task its always time out since the start time is long time ago
-				// if so, assign the task to a new worker
-				for i, task := range c.mapTasks {
-					if !task.Done && time.Since(task.Start_time) > 10 * time.Second {
-						response.Type = MAP
-						response.Id = i
-						response.Files = task.Files
-						response.NReduce = len(c.reduceTasks) //assign total number of reduce task to the worker for hash function
-						task.Start_time = time.Now()
-						return // assign task and return, no need to check other tasks since we only assign one task at a time
-					}
-					//if there is no unfinished map task, ask the worker to wait till all maps are done and then start reduce
-					response.Type = WAIT
-				}
-			} else if c.nReduce > 0 { //if all map tasks are done, assign reduce task
-				for i, task := range c.reduceTasks {
-					if !task.Done && time.Since(task.Start_time) > 10 * time.Second {
-						response.Type = REDUCE
-						response.Id = i
-						response.Files = task.Files
-						response.NReduce = len(c.reduceTasks)
-						task.Start_time = time.Now()
-						return
-					}
-					response.Type = WAIT //if there is no unfinished reduce task, ask the worker to wait till all reduces are done
-				}
-			}else{
-				response.Type = DONE //if all map and reduce tasks are done, tell the worker to exit
-			}
 	}
+	
+	//assign task to the worker everytime it request a task
 
-	// Now neith
-
-
-//
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-//
-func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
+	//when the worker request a task, it will send a INIT request to the coordinator
+	//we will assign a map task or reduce task to the worker
+	now := time.Now()
+	timeoutAgo := now.Add(-10 * time.Second)
+	if c.mapleft> 0 {
+		//check if there is (unfinished map task) and (has been work for more than 10 seconds) 
+		//new task will also be assinged since new task its always time out since the start time is long time ago
+		// if so, assign the task to a new worker
+		for idx := range c.mapTasks {
+			t := &c.mapTasks[idx]
+			if !t.Done && t.Start_time.Before(timeoutAgo) {
+				response.Type = MAP
+				response.Id = t.Id
+				response.Files = t.Files
+				response.NReduce = len(c.reduceTasks)
+				t.Start_time = now 
+				return nil
+			}
+		}
+		//if all tasks have been started and not timed out || done, ask the worker to wait
+		response.Type = WAIT
+	} else if c.reduceleft> 0 { //if all map tasks are done, assign reduce task
+		for idx := range c.reduceTasks {
+			t := &c.reduceTasks[idx]
+			if !t.Done && t.Start_time.Before(timeoutAgo) {
+				response.Type = REDUCE
+				response.Id = t.Id
+				response.Files = t.Files
+				t.Start_time = now 
+				return nil
+			}
+		}
+		response.Type = WAIT //if there is no unfinished reduce task, ask the worker to wait till all reduces are done
+	}else{
+		response.Type = DONE //if all map and reduce tasks are done, tell the worker to exit
+		log.Printf("your job is done")
+	}
+	//print the assigned task
+	log.Printf("response: Type: %v , ID: %v", response.Type, response.Id)
 	return nil
 }
-
 
 //
 // start a thread that listens for RPCs from worker.go
@@ -127,12 +140,10 @@ func (c *Coordinator) Done() bool {
 	// Your code here.
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.reduceLeft == 0 && c.mapLeft == 0 {
+	if c.reduceleft == 0 && c.mapleft == 0 {
 		ret = true
 		log.Printf("All tasks are done")
 	}
-	log.Printf("reduceLeft: %d, mapLeft: %d", c.reduceLeft, c.mapLeft)
-
 	return ret
 }
 
@@ -142,12 +153,9 @@ func (c *Coordinator) Done() bool {
 // nReduce is the number of reduce tasks to use.
 //
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	c := Coordinator{}
-
-	// Your code here.
 	c := Coordinator{
-		reduceLeft: nReduce,
-		mapLeft: len(files),
+		reduceleft: nReduce,
+		mapleft: len(files),
 		mapTasks: make([]Task, len(files)),
 		reduceTasks: make([]Task, nReduce),
 	}
@@ -168,6 +176,14 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 			Files: []string{},
 			Done: false,
 		}
+	}
+	
+	//print coordinator info
+	log.Print("Coordinator info:")
+	log.Printf("Number of map tasks: %v", c.mapleft)
+	log.Printf("Number of reduce tasks: %v", c.reduceleft)
+	log.Printf("len of mapTasks: %v", len(c.mapTasks))
+	log.Printf("len of reduceTasks: %v", len(c.reduceTasks))
 
 	c.server()
 	return &c
