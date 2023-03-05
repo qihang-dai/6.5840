@@ -36,3 +36,7 @@ Use 2023 version. The content are the same while the provided code is less buggy
 **2023-02-24": 
     finish video 1
     start lab 1
+
+**2023-03-04": 
+    finish lab1.
+    takes one week
