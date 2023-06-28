@@ -40,3 +40,7 @@ Use 2023 version. The content are the same while the provided code is less buggy
 **2023-03-04": 
     finish lab1.
     takes one week
+
+**2023-06-28:
+    finish lab2 part1 reading
+    start lab2a
