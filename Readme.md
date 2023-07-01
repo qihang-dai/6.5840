@@ -44,3 +44,6 @@ Use 2023 version. The content are the same while the provided code is less buggy
 **2023-06-28:
     finish lab2 part1 reading
     start lab2a
+
+**2023-07-01:
+    finish lab2a, start lab2b 
