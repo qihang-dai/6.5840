@@ -45,7 +45,7 @@ type VoteState int
 
 type AppendEntriesState int
 
-var HeartbeatInterval = 100 * time.Millisecond
+var HeartbeatInterval = 120 * time.Millisecond
 
 
 type LogEntry struct {
@@ -148,6 +148,7 @@ type AppendEntriesReply struct {
 	Term int
 	Success bool
 	AppState AppendEntriesState
+	UpNextIndex int 
 }
 
 // save Raft's persistent state to stable storage,
@@ -251,14 +252,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	//reset the vote after term is updated for this follower
 	if rf.votedFor == -1 {
-		currentLogIndex := len(rf.log) - 1
-		currentLogTerm := 0
-		if currentLogIndex >= 0 {
-			//set log term if the log is not empty
-			currentLogTerm = rf.log[currentLogIndex].Term
+		lastlogTerm := 0
+		if len(rf.log) > 0 {
+			lastlogTerm = rf.log[len(rf.log) - 1].Term
 		}
-
-		if args.LastLogIndex < currentLogIndex || args.LastLogTerm < currentLogTerm {
+		//check whose term bigger and if term equal check who has more date
+		if args.LastLogTerm < lastlogTerm || args.LastLogTerm == lastlogTerm && args.LastLogIndex < len(rf.log) {
 			reply.VoteState = Expired
 			reply.Term = rf.currentTerm
 			reply.VoteGranted = false
@@ -335,7 +334,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	//if the candidate args who request vote's term is lower, current raft server will not vote for it and return false
+	// when there is two candidate, the one with lower term wont get vote from the higher term candidate 
 	if args.Term < rf.currentTerm {
 		return false
 	}
@@ -377,6 +376,156 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
+//this is for follower processing request(args)
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply){
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if rf.killed() {
+		reply.AppState = AppKilled
+		reply.Term = -1
+		reply.Success = false
+		return
+	}
+
+	//if the args term is lower than the current term, the message is outdated, there is a split brain problem
+	if args.Term < rf.currentTerm {
+		reply.AppState = AppOutdated
+		reply.Term = rf.currentTerm
+		reply.Success = false
+		return
+	}
+
+	// this means the follower has conflict(1. missing (fall behind) 2.mismatch) log entry, so it will not append the log entry
+	if args.PrevLogIndex > 0 && (args.PrevLogIndex > len(rf.log) || rf.log[args.PrevLogIndex - 1].Term != args.PrevLogTerm) {
+		reply.AppState = Mismatch
+		reply.Term = rf.currentTerm
+		reply.Success = false
+		reply.UpNextIndex = rf.lastApplied + 1
+		return
+	}
+
+	// if the current raft is more advanced, the log have already been appended or committed, so it will not append the log entry
+	if args.PrevLogIndex != -1 && rf.lastApplied > args.PrevLogIndex {
+		reply.AppState = AppCommited 
+		reply.Term = rf.currentTerm
+		reply.Success = false
+		reply.UpNextIndex = rf.lastApplied + 1
+		return
+	}
+
+	//well now if the log entry is okay to append, we update the state in this follower raft
+	rf.currentTerm = args.Term
+	rf.status = Follower
+	rf.votedFor = args.LeaderId
+	rf.timer.Reset(rf.overtime) //appended, reset the timer like a heartbeat thus no election will be started
+
+	//now we can prepare the reply
+	reply.Term = rf.currentTerm
+	reply.Success = true
+	reply.AppState = AppNormal
+
+	//now we append the log entry
+	if args.Entries != nil {
+		rf.log = rf.log[:args.PrevLogIndex] //this line will overwrite conflict in follower, i guess
+		rf.log = append(rf.log, args.Entries...)
+	}
+
+	//now handle commit log
+	for rf.lastApplied < args.LeaderCommit{
+		rf.lastApplied++
+		applyMsg := ApplyMsg{
+			CommandValid: true,
+			Command: rf.log[rf.lastApplied - 1].Command,
+			CommandIndex: rf.lastApplied,
+		}
+		rf.applyChan <- applyMsg 
+		rf.committedIndex = rf.lastApplied
+	}
+}
+
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply, appendNums *int) bool {
+	if rf.killed() {
+		return false
+	}
+
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+
+	for !ok{
+		if rf.killed() {
+			return false
+		}
+		ok = rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	}
+
+	//print call success
+	// fmt.Printf("server %d call server %d success\n", rf.me, server)
+	
+	//the lock set here incase retry the call get deadlocked
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+
+	switch reply.AppState {
+		case AppKilled:
+			return false
+		case AppOutdated:
+			//When there is two leader? append message term is lower, thus the current leader should convert to follower
+			rf.status = Follower
+			//if role change, everything reset, inculding the heartbeat timer
+			rf.timer.Reset(rf.overtime)
+			rf.votedFor = -1
+			rf.currentTerm = reply.Term
+		case Mismatch:
+			//in case the message fails to reach in time, the nextIndex will not be updated
+			//outdated does not need this cause its already outdated.
+			if args.Term != rf.currentTerm {
+				return false
+			}
+			rf.nextIndex[server] = reply.UpNextIndex
+		case AppCommited:
+			if args.Term != rf.currentTerm {
+				return false
+			}
+			rf.nextIndex[server] = reply.UpNextIndex
+		case AppNormal:
+			//Leader only commit if more than half of the server append the log entry
+			if reply.Success && args.Term == rf.currentTerm && *appendNums <= len(rf.peers) / 2 {
+				*appendNums++
+			}
+
+			//the append index is outofrange
+			//fisrt index of log is 1, so the last index is len(rf.log), the next index is len(rf.log) + 1
+			if rf.nextIndex[server] > len(rf.log) + 1 {
+				return false 
+			}
+
+			//we have append the log entry in the follower, so update the index
+			if *appendNums > len(rf.peers) / 2 {
+				//reset appendNums so wont commit again
+				*appendNums = 0
+				
+				//log is empty (something wrong whe client append leader log)
+				if len(rf.log) == 0  || rf.log[len(rf.log) - 1].Term != rf.currentTerm {
+					return false
+				}
+
+				for rf.lastApplied < len(rf.log){
+					rf.lastApplied++
+					applyMsg := ApplyMsg{
+						CommandValid: true,
+						Command: rf.log[rf.lastApplied - 1].Command,
+						CommandIndex: rf.lastApplied,
+					}
+					rf.applyChan <- applyMsg 
+					rf.committedIndex = rf.lastApplied
+				}
+
+			}
+
+	}
+	return ok
+}
 
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -396,6 +545,21 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
+	if rf.killed() {
+		return index, term, false
+	}
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if rf.status != Leader {
+		return index, term, false
+	}
+
+	//if the server is leader, append the command to the log
+	rf.log = append(rf.log, LogEntry{Term: rf.currentTerm, Command: command})
+	index = len(rf.log)
+	term = rf.currentTerm
 
 
 	return index, term, isLeader
@@ -461,7 +625,7 @@ func (rf *Raft) ticker() {
 						voteArgs := RequestVoteArgs{
 							Term: rf.currentTerm,
 							CandidateId: rf.me,
-							LastLogIndex: len(rf.log) - 1,
+							LastLogIndex: len(rf.log),
 							//if the log is empty, the last log term is 0, else it is the last log entry's term
 							LastLogTerm: 0, 
 						}
@@ -476,22 +640,33 @@ func (rf *Raft) ticker() {
 					}
 				case Leader:
 					//send heartbeat to all other servers
-					// appendNums := 1
+					appendNums := 1
 					rf.timer.Reset(HeartbeatInterval)
 					for i := 0; i < len(rf.peers); i++{
 						if i == rf.me {
 							continue
 						}
-						// appendEntriesArgs := AppendEntriesArgs{
-						// 	Term: rf.currentTerm,
-						// 	LeaderId: rf.me,
-						// 	PrevLogIndex: 0,
-						// 	PrevLogTerm: 0,
-						// 	Entries: nil,
-						// 	LeaderCommit: rf.committedIndex,
-						// }
-						// appendEntriesReply := AppendEntriesReply{}
-						// go rf.sendAppendEntries(i, &appendEntriesArgs, &appendEntriesReply, &appendNums)
+						appendEntriesArgs := AppendEntriesArgs{
+							Term: rf.currentTerm,
+							LeaderId: rf.me,
+							PrevLogIndex: 0,
+							PrevLogTerm: 0,
+							Entries: nil,
+							LeaderCommit: rf.committedIndex,
+						}
+						appendEntriesReply := AppendEntriesReply{}
+						
+						//
+						appendEntriesArgs.Entries = rf.log[rf.nextIndex[i] - 1:]
+						if rf.nextIndex[i] > 0{
+							appendEntriesArgs.PrevLogIndex = rf.nextIndex[i] - 1
+						}
+						if appendEntriesArgs.PrevLogIndex > 0 {
+							appendEntriesArgs.PrevLogTerm = rf.log[appendEntriesArgs.PrevLogIndex - 1].Term
+						}
+
+						
+						go rf.sendAppendEntries(i, &appendEntriesArgs, &appendEntriesReply, &appendNums)
 					}
 
 			}
