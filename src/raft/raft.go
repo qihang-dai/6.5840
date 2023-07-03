@@ -490,7 +490,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 			rf.nextIndex[server] = reply.UpNextIndex
 		case AppNormal:
 			//Leader only commit if more than half of the server append the log entry
-			if reply.Success && args.Term == rf.currentTerm && *appendNums <= len(rf.peers) / 2 {
+			if reply.Success && reply.Term == rf.currentTerm && *appendNums <= len(rf.peers) / 2 {
 				*appendNums++
 			}
 
@@ -500,6 +500,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 				return false 
 			}
 
+			rf.nextIndex[server] += len(args.Entries)
 			//we have append the log entry in the follower, so update the index
 			if *appendNums > len(rf.peers) / 2 {
 				//reset appendNums so wont commit again
