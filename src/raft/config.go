@@ -142,6 +142,8 @@ func (cfg *config) checkLogs(i int, m ApplyMsg) (string, bool) {
 	v := m.Command
 	for j := 0; j < len(cfg.logs); j++ {
 		if old, oldok := cfg.logs[j][m.CommandIndex]; oldok && old != v {
+			//show old and v
+			log.Printf("old: %v, v: %v\n", old, v)
 			log.Printf("%v: log %v; server %v\n", i, cfg.logs[i], cfg.logs[j])
 			// some server has already committed a different value for this entry!
 			err_msg = fmt.Sprintf("commit index=%v server=%v %v != server=%v %v",
@@ -555,6 +557,7 @@ func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 	t0 := time.Now()
 	starts := 0
+	// fmt.Println("start config one")
 	for time.Since(t0).Seconds() < 10 && cfg.checkFinished() == false {
 		// try all the servers, maybe one is the leader.
 		index := -1
@@ -578,28 +581,38 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 		if index != -1 {
 			// somebody claimed to be the leader and to have
 			// submitted our command; wait a while for agreement.
+			// fmt.Println("wait for agreement")
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
 				if nd > 0 && nd >= expectedServers {
 					// committed
+					// fmt.Println("commit start")
+					// fmt.Printf("nd: %v, cmd1: %v, cmd: %v\n", nd, cmd1, cmd)
 					if cmd1 == cmd {
 						// and it was the command we submitted.
+						// fmt.Println("!!commit finish, index is ", index)
 						return index
 					}
+				}else{
+					// fmt.Println("nd: ", nd, "expcted servers", expectedServers)
 				}
 				time.Sleep(20 * time.Millisecond)
 			}
+			// fmt.Println("fail to reach the same cmd within 2 seconds")	
+			// fmt.Println("fail to reach the same cmd within 2 seconds")
 			if retry == false {
 				cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 			}
 		} else {
 			time.Sleep(50 * time.Millisecond)
+			// fmt.Println("index is -1")
 		}
 	}
 	if cfg.checkFinished() == false {
 		cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 	}
+	// fmt.Println("finish config one")
 	return -1
 }
 

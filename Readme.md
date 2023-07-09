@@ -51,3 +51,8 @@ Use 2023 version. The content are the same while the provided code is less buggy
 **2023-07-03：
     finish lab2b
     ![Vote Append without log restriction](image.png)
+
+**2023-07-09：
+    fnish lab2c not perfectly
+    cant pass Figure 8 (unreliable) test (might be a bug in the windows wsl)
+    persist() is needed whenever nonvolatile state changes
